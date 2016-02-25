@@ -35,7 +35,11 @@ let set_margin fmt = pp_set_margin fmt 80 (* (if compact then max_int else 80) *
 (* disable the preprocessor and tell cvc4 to dump proofs *)
 (* KLUDGE we use a linux version through ssh because of bugs in the mac
    version *)
-let cvc4_proof_cmd = "ssh kind \"~/CVC4_proofs/builds/x86_64-unknown-linux-gnu/production-proof/bin/cvc4 --lang smt2 --no-simplification --dump-proof\" <"
+(* let cvc4_proof_cmd = "ssh kind \"~/CVC4_proofs/builds/x86_64-unknown-linux-gnu/production-proof/bin/cvc4 --lang smt2 --no-simplification --dump-proof\" <" *)
+
+let cvc4_proof_cmd =
+  Flags.cvc4_bin () ^
+  " --lang smt2 --no-simplification --dump-proof"
 
 
 (* LFSC symbols *)
@@ -84,8 +88,8 @@ let s_pindex = H.mk_hstring "%index%"
 let s_mk_ind = H.mk_hstring "mk_ind"
 let s_pk = H.mk_hstring "%%k"
 
-let s_Int = H.mk_hstring "Int"
-let s_int = H.mk_hstring "int"
+(* let s_Int = H.mk_hstring "Int" *)
+let s_ind = H.mk_hstring "ind"
 let s_mpz = H.mk_hstring "mpz"
 
 let s_invariant = H.mk_hstring "invariant"
@@ -116,17 +120,22 @@ let hstring_of_int i = H.mk_hstring (string_of_int i)
 
 let hole = HS.Atom s_hole
 
+(* LFSC types (sexpressions) *)
 type lfsc_type = HS.t
+
+(* LFSC terms (sexpressions) *)
 type lfsc_term = HS.t
 
 let ty_formula = HS.Atom s_formula
 let ty_term ty = HS.(List [Atom s_term; ty])
 
+(* Type of LFSC declarations *)
 type lfsc_decl = {
   decl_symb : H.t;
   decl_type : lfsc_type;
 }
 
+(* Type of LFSC definitions *)
 type lfsc_def = {
   def_symb : H.t;
   def_args : (H.t * lfsc_type) list;
@@ -134,18 +143,33 @@ type lfsc_def = {
   def_body : lfsc_term;
 }
 
+(* Comparison for equality of declarations *)
+let equal_decl d1 d2 =
+  H.equal d1.decl_symb d2.decl_symb &&
+  HS.equal d1.decl_type d2.decl_type
+
+(* Comparison for equality of definitions *)
+let equal_def d1 d2 =
+  H.equal d1.def_symb d2.def_symb &&
+  HS.equal d1.def_ty d2.def_ty &&
+  HS.equal d1.def_body d2.def_body
+(* add args if needed *)
+  
+(* Type of contexts for proofs *)
 type cvc4_proof_context = {
   lfsc_decls : lfsc_decl list;
   lfsc_defs : lfsc_def list;
-  fun_defs_args : (H.t * lfsc_type) list HH.t;
+  fun_defs_args : (H.t * int * lfsc_type) list HH.t;
 }
 
+(* Empty context *)
 let mk_empty_proof_context () = {
   lfsc_decls = [];
   lfsc_defs = [];
   fun_defs_args = HH.create 17;
 }
 
+(* The type of a proof returned by CVC4 *)
 type cvc4_proof = {
   proof_context : cvc4_proof_context;
   proof_hyps : lfsc_decl list; 
@@ -153,6 +177,7 @@ type cvc4_proof = {
   proof_term : lfsc_type;
 }
 
+(* Create an empty proof from a context *)
 let mk_empty_proof ctx = {
   proof_context = ctx;
   proof_hyps = [];
@@ -160,11 +185,13 @@ let mk_empty_proof ctx = {
   proof_term = HS.List [];
 }
 
+
+(* Classifier for lambda abstractions in LFSC *)
 type lambda_kind =
-  | Lambda_decl of lfsc_decl
-  | Lambda_hyp of lfsc_decl
-  | Lambda_def of lfsc_def
-  | Lambda_ignore
+  | Lambda_decl of lfsc_decl (* symbol/variables declarations *)
+  | Lambda_hyp of lfsc_decl  (* Proof hypothesis % A0 ...*)
+  | Lambda_def of lfsc_def   (* definitions % f%def *)
+  | Lambda_ignore            (* ignore some extraneous symbols *)
 
 
 
@@ -172,27 +199,34 @@ type lambda_kind =
 (* Printing LFSC terms and proofs *)
 (**********************************)
 
+(* print an LFSC type *)
 let print_type =
   if compact then HS.pp_print_sexpr_indent_compact 0
   else HS.pp_print_sexpr_indent 0
 
+(* print an LFSC term *)
 let print_term =
   if compact then HS.pp_print_sexpr_indent_compact 0
   else HS.pp_print_sexpr_indent 0
 
 
+(* print an LFSC declarations *)
 let print_decl fmt { decl_symb; decl_type } =
   fprintf fmt "@[<hov 1>(declare@ %a@ %a)@]"
     H.pp_print_hstring decl_symb print_type decl_type
 
 
+(* print the type of a symbol for its LFSC definition *)
 let rec print_def_type ty fmt args =
   match args with
   | [] -> print_type fmt ty
   | (_, ty_a) :: rargs ->
-    fprintf fmt "@[<hov 0>(! _ %a@ %a)@]" print_type ty_a (print_def_type ty) rargs
+    fprintf fmt "@[<hov 0>(! _ %a@ %a)@]"
+      print_type ty_a
+      (print_def_type ty) rargs
 
 
+(* print the LFSC definition as a lambda abstraction *)
 let rec print_def_lambdas term fmt args =
   match args with
   | [] -> print_term fmt term
@@ -201,7 +235,7 @@ let rec print_def_lambdas term fmt args =
       H.pp_print_hstring a (print_def_lambdas term) rargs
 
 
-
+(* Print an LFSC definition with type information *)
 let print_def fmt { def_symb; def_args; def_ty; def_body } =
   fprintf fmt "@[<hov 1>(define@ %a@ @[<hov 1>(: @[<hov 0>%a@]@ %a)@])@]"
     H.pp_print_hstring def_symb
@@ -209,17 +243,38 @@ let print_def fmt { def_symb; def_args; def_ty; def_body } =
     (print_def_lambdas def_body) def_args
 
 
+(* Print a proof context *)
 let print_context fmt { lfsc_decls; lfsc_defs } =
   List.iter (fprintf fmt "%a@." print_decl) (List.rev lfsc_decls);
   fprintf fmt "@.";
   List.iter (fprintf fmt "%a\n@." print_def) lfsc_defs;
   fprintf fmt "@."
 
+(* Print only definitions of a proof context *)
 let print_defs fmt { lfsc_defs } =
   List.iter (fprintf fmt "%a\n@." print_def) lfsc_defs;
   fprintf fmt "@."
 
+(* Print extra declarations/definitions of a context.
+   [print_delta_context ctx_old fmt ctx_new] prints the elements of [ctx_new]
+   that do not appear in [ctx_old]. *)
+let print_delta_context
+    { lfsc_decls=old_decls; lfsc_defs=old_defs }
+    fmt
+    { lfsc_decls; lfsc_defs } =
+  List.iter (fun d ->
+      if not (List.exists (equal_decl d) old_decls) then
+        fprintf fmt "%a@." print_decl d
+    ) (List.rev lfsc_decls);
+  (* fprintf fmt "@."; *)
+  List.iter (fun dl ->
+      if not (List.exists (equal_def dl) old_defs) then
+        fprintf fmt "%a\n@." print_def dl
+    ) lfsc_defs
+  (* fprintf fmt "@." *)
 
+
+(* Print the type of an hypothesis with its name *)
 let rec print_hyps_type ty fmt = function
   | [] -> print_type fmt ty
   | { decl_symb; decl_type } :: rhyps ->
@@ -228,7 +283,7 @@ let rec print_hyps_type ty fmt = function
       print_type decl_type
       (print_hyps_type ty) rhyps
 
-
+(* Print a proof term as lambda abstraction over its hypostheses *)
 let rec print_proof_term term fmt = function
   | [] -> print_term fmt term
   | { decl_symb } :: rhyps ->
@@ -237,6 +292,7 @@ let rec print_proof_term term fmt = function
       (print_proof_term term) rhyps
 
 
+(* Print an LFSC proof *)
 let print_proof ?(context=false) name fmt
     { proof_context; proof_hyps; proof_type; proof_term } =
   if context then print_context fmt proof_context;
@@ -252,24 +308,32 @@ let print_proof ?(context=false) name fmt
 (* Parsing LFSC proofs from CVC4 *)
 (*********************************)
 
+(* Lexicographic comparison of hashconsed strings (used for sorting dummy
+   arguments f%1, f%2, f%3, ...) *)
 let lex_comp h1 h2 =
   String.compare (H.string_of_hstring h1) (H.string_of_hstring h2)
 
-let lex_comp_b (h1, _) (h2, _) = lex_comp h1 h2
+
+(* Same on bindings *)
+let lex_comp_b (_, i1, _) (_, i2, _) = Pervasives.compare i1 i2
 
 
+(* Return the symbol f in dummy symbol f%1 and register it as an argument of
+   function f *)
 let fun_symbol_of_dummy_arg ctx b ty =
   let s = H.string_of_hstring b in
   try
-    Scanf.sscanf s "%s@%%%_d" (fun f ->
+    Scanf.sscanf s "%s@%%%d" (fun f i ->
       let hf = H.mk_hstring f in
       let args = try HH.find ctx.fun_defs_args hf with Not_found -> [] in
-      let nargs = (b, ty) :: args |> List.fast_sort lex_comp_b in
+      let nargs = (b, i, ty) :: args |> List.fast_sort lex_comp_b in
       HH.replace ctx.fun_defs_args hf nargs
       );
     true
   with End_of_file | Scanf.Scan_failure _ -> false
 
+
+(* Return the symbol f in dummy function symbol f%def *)
 let fun_symbol_of_def b =
   let s = H.string_of_hstring b in
   try
@@ -289,9 +353,13 @@ let rec fun_symbol_args_of_def acc =
     fun_symbol_args_of_def (arg :: acc) f
   | _ -> None
 
+(* Return the symbol f of a function definition dummy hypothesis appearing in
+   tracing LFSC proof. Example: [fun_symbol_args_of_def "(apply _ _ (apply _ _
+   f f%1) f%2)"] returns ["f"].
+*)
 let fun_symbol_args_of_def sexp = fun_symbol_args_of_def [] sexp
 
-
+(* Returns [true] if the bounded symbol stands for an hypothesis *)
 let is_hyp b ty =
   let s = H.string_of_hstring b in
   try Scanf.sscanf s "A%_d" true (* A0, A1, A2, etc. *)
@@ -300,40 +368,52 @@ let is_hyp b ty =
        hypotheses *)
     b == s_pk
 
-
-let is_index_var b =
+(* Returns [true] if the bounded symbol is an index constant of the form
+   [%%2] *)
+let is_index_constant b =
 let s = H.string_of_hstring b in
 try Scanf.sscanf s "%%%%%_s" true
 with End_of_file | Scanf.Scan_failure _ -> false
 
+(* Returns the integer index of an index constant *)
 let mpz_of_index b =
 let s = H.string_of_hstring b in
 try Scanf.sscanf s "%%%%%d" (fun n -> Some n)
 with End_of_file | Scanf.Scan_failure _ -> None
 
-let term_index = HS.(List [Atom s_term; Atom (H.mk_hstring "index")])
+(* LFSC [(term index)] *)
+let term_index = HS.(List [Atom s_term; Atom s_index])
 
+(* LFSC type for representing indexes *)
 let s_lfsc_index = if mpz_proofs then s_mpz else s_pindex
 
+(* substitution [(term index) -> %index%] *)
 let sigma_pindex = [term_index, HS.Atom s_pindex]
+
+(* substitution [(term index) -> mpz] *)
 let sigma_mpz = [term_index, HS.Atom s_mpz;]
                  (* HS.Atom s_index, HS.Atom s_Int] *)
 
+(* substitution from [(term index)] to the selected representation *)
 let sigma_tindex = if mpz_proofs then sigma_mpz else sigma_pindex
 
+(* Returns [true] if the LFSC expression is the type for indexes [(term
+   index)] *)
 let is_term_index_type = function
   | HS.List [HS.Atom t; HS.Atom i] -> t == s_term && i == s_index
   | _ -> false
 
+(* Returns [true] if the argument is ["index"] *)
 let is_index_type i = i == s_index
 
-
+(* Identify useless hypothesis [(th_holds true)] (already in the rules of
+   smt.plf) *)
 let is_hyp_true = let open HS in function
   | List [Atom th_holds; Atom tt]
     when th_holds == s_th_holds && tt == s_true -> true
   | _ -> false
 
-
+(* Apply a substitution top to bottom in an LFSC expression *)
 let rec apply_subst sigma sexp =
   let open HS in
   try List.find (fun (s,v) -> HS.equal sexp s) sigma |> snd
@@ -345,26 +425,31 @@ let rec apply_subst sigma sexp =
       else List l'
     | Atom _ -> sexp
 
-
+(* Replace the type [(term index)] by the chosen representation *)
 let repalace_type_index = apply_subst sigma_tindex
 
-
+(* Replacing a constant of type index by an embedding of their chosen
+   representation. For example, [%%1] becomes [f (ind 1)] (for mpz embedding)
+   and an index variable [i] becomes [(ind i)]. *)
 let embed_ind =
   if mpz_proofs then
     fun a -> match a with
     | HS.Atom i ->
       begin match mpz_of_index i with
-        | Some n -> HS.(List [Atom s_int; Atom (H.mk_hstring (string_of_int n))])
-        | None -> HS.(List [Atom s_int; a])
+        | Some n ->
+          HS.(List [Atom s_ind; Atom (H.mk_hstring (string_of_int n))])
+        | None -> HS.(List [Atom s_ind; a])
       end
-    | _ -> HS.(List [Atom s_int; a])
+    | _ -> HS.(List [Atom s_ind; a])
   else
     fun a -> HS.(List [Atom s_mk_ind; a])
 
+(* Embed indexes by replacing index constants and variables by the chosen
+   representation *)
 let rec embed_indexes targs sexp =
   let open HS in
   match sexp with
-  | Atom i when is_index_var i -> embed_ind sexp
+  | Atom i when is_index_constant i -> embed_ind sexp
   | Atom a ->
     (match List.assq a targs with
      | HS.Atom i when i == s_lfsc_index -> embed_ind sexp
@@ -372,7 +457,7 @@ let rec embed_indexes targs sexp =
      | _ -> sexp
      | exception Not_found -> sexp)
   | List l ->
-    let l' = List.map (embed_indexes targs) l in
+    let l' = List.rev_map (embed_indexes targs) l |> List.rev in
     if List.for_all2 (==) l l' then sexp
     else List l'
 
@@ -416,7 +501,7 @@ let rec definition_artifact_rec ctx = let open HS in function
       | Some (f, _) ->
         let targs = try HH.find ctx.fun_defs_args f with Not_found -> [] in
         let targs =
-          List.map (fun (x, ty) -> x, repalace_type_index ty) targs in
+          List.map (fun (x, _, ty) -> x, repalace_type_index ty) targs in
         Some { def_symb = f;
                def_args = targs;
                def_body = embed_indexes targs term;
@@ -429,7 +514,7 @@ let rec definition_artifact_rec ctx = let open HS in function
       | Some (f, _) ->
         let targs = try HH.find ctx.fun_defs_args f with Not_found -> [] in
         let targs =
-          List.map (fun (x, ty) -> x, repalace_type_index ty) targs in
+          List.map (fun (x, _, ty) -> x, repalace_type_index ty) targs in
         Some { def_symb = f;
                def_args = targs;
                def_body = embed_indexes targs term;
@@ -437,38 +522,63 @@ let rec definition_artifact_rec ctx = let open HS in function
     end
   | _ -> None
 
-
+(* Identifies definition artifacts introduces to trace inling of CVC4 terms at
+   the LFSC level. For example, [(th_holds (@ let38 P1%1(iff (p_app (apply _ _
+   P1%def P1%1)) (p_app (apply _ _ top.usr.OK P1%1)))))] is an articfact for
+   the definition of pymbol [P1]. *)
 let definition_artifact ctx = let open HS in function
     | List [Atom th_holds; d] when th_holds == s_th_holds ->
       definition_artifact_rec ctx d
     | _ -> None
 
-
+(* Parse lambda binding in proof and classify them. *)
 let parse_Lambda_binding ctx b ty =
   if is_hyp b ty then
-    if is_hyp_true ty then Lambda_ignore
+    if is_hyp_true ty then
+      (* ignore useless (th_holds true) *)
+      Lambda_ignore
     else match definition_artifact ctx ty with
-      | Some def -> Lambda_def def
+      | Some def ->
+        (* binding hypothesis for a definition artifact *)
+        Lambda_def def
       | None ->
+        (* Otherwise its a real hypothesis *)
         Lambda_hyp { decl_symb = b;
                      decl_type = repalace_type_index ty |> embed_indexes [] }
   else if fun_symbol_of_dummy_arg ctx b ty || fun_symbol_of_def b <> None then
+    (* ignore introduced dummy symbols *)
     Lambda_ignore
-  else if is_index_type b then Lambda_ignore
-  else if is_index_var b then Lambda_ignore
-  else Lambda_decl { decl_symb = b; decl_type = ty }
+  else if is_index_type b then
+    (* ignore declaration of abstract type index (already in LFSC rules) *)
+    Lambda_ignore
+  else if is_index_constant b then
+    (* Ignore declaration of index constants *)
+    Lambda_ignore
+  else
+    (* Keep declaration otheriwse *)
+    Lambda_decl { decl_symb = b; decl_type = ty }
 
 
 (***********************)
 (* Parsing proof terms *)
 (***********************)
 
+(* Parse a proof from CVC4, returns a [!cvc_proof] object *)
 let rec parse_proof acc = let open HS in function
 
   | List [Atom lam; Atom b; ty; r] when lam == s_LAMBDA ->
 
-    let acc = match parse_Lambda_binding acc.proof_context b ty with
-      | Lambda_decl _ | Lambda_def _ | Lambda_ignore -> acc
+    let ctx = acc.proof_context in
+    let acc = match parse_Lambda_binding ctx b ty with
+      | Lambda_decl d ->
+        if List.exists (equal_decl d) ctx.lfsc_decls then acc
+        else { acc with proof_context =
+                          { ctx with lfsc_decls = d :: ctx.lfsc_decls }}
+      | Lambda_def d ->
+        if List.exists (equal_def d) ctx.lfsc_defs then acc
+        else { acc with proof_context =
+                          { ctx with lfsc_defs = d :: ctx.lfsc_defs }}
+      | Lambda_ignore -> acc
       | Lambda_hyp h -> { acc with proof_hyps = h :: acc.proof_hyps }
     in
     parse_proof acc r
@@ -480,6 +590,7 @@ let rec parse_proof acc = let open HS in function
   | _ -> assert false
 
 
+(* Parse a proof from CVC4 from one that start with [(check ...]. *)
 let parse_proof_check ctx = let open HS in function
   | List [Atom check; proof] when check == s_check ->
     parse_proof (mk_empty_proof ctx) proof
@@ -487,6 +598,8 @@ let parse_proof_check ctx = let open HS in function
 
 
 
+(* Parse a proof from CVC4 from a channel. CVC4 returns the proof after
+   displaying [unsat] on the channel. *)
 let proof_from_chan ctx in_ch =
 
   let lexbuf = Lexing.from_channel in_ch in
@@ -509,7 +622,7 @@ let proof_from_chan ctx in_ch =
     | _ -> assert false
 
 
-
+(* Call CVC4 in proof production mode on an SMT2 file an returns the proof *)
 let proof_from_file ctx f =
   let cmd = cvc4_proof_cmd ^ " " ^ f in
   let ic, oc, err = Unix.open_process_full cmd (Unix.environment ()) in
@@ -522,6 +635,7 @@ let proof_from_file ctx f =
 (* Parsing context from dummy lfsc proofs *)
 (******************************************)
 
+(* Parse a context from a dummy proof used only for tracing *)
 let rec parse_context ctx = let open HS in function
 
   | List [Atom lam; Atom b; ty; r] when lam == s_LAMBDA ->
@@ -538,13 +652,16 @@ let rec parse_context ctx = let open HS in function
   | _ -> assert false
 
 
+(* Parse a context from a dummy proof check used only for tracing *)
 let parse_context_dummy = let open HS in function
   | List [Atom check; dummy] when check == s_check ->
     parse_context (mk_empty_proof_context ()) dummy
   | _ -> assert false
 
 
-
+(* Parse a context from a channel. The goal is trivial because the file
+   contains "(assert false)" but we care about the hypotheses to recontruct the
+   LFSC definitions inlined by CVC4. *)
 let context_from_chan in_ch =
 
   let lexbuf = Lexing.from_channel in_ch in
@@ -566,7 +683,8 @@ let context_from_chan in_ch =
       
     | _ -> assert false
 
-
+(* Call CVC4 on a file that contains only tracing information and parse the
+   dummy proof to extract the context (declarations and definitions). *)
 let context_from_file f =
   let cmd = cvc4_proof_cmd ^ " " ^ f in
   let ic, oc, err = Unix.open_process_full cmd (Unix.environment ()) in
@@ -575,7 +693,7 @@ let context_from_file f =
   ignore(Unix.close_process_full (ic, oc, err));
   ctx
 
-
+(* Merge two contexts *)
 let merge_contexts ctx1 ctx2 =
   {
     lfsc_decls = ctx2.lfsc_decls @ ctx1.lfsc_decls;
@@ -592,26 +710,26 @@ let merge_contexts ctx1 ctx2 =
 open Certificate
 
 
-(* let system_to_lfsc s = *)
-(*   printf "Extracting LFSC context from CVC4 proof@."; *)
-(*   let ctx = context_from_file *)
-(*       (Filename.concat s.dirname s.smt2_lfsc_trace_file) in *)
-
-
-let write_proof_and_check fmt pname ptype pterm =
+(* Write a proof to the formatter. The proof is given a name [pname] and a
+   [type]. The Boolean [check] is used to tell that if LFSC should check this
+   proof (its not necessary if the proof is reused in another check). *)
+let write_proof_and_check fmt ?(check=true) pname ptype pterm =
 
   fprintf fmt "@[<hov 1>(define@ %a@ @[<hov 1>(: @[<hov 0>%a@]@ %a)@])@]@.@."
     H.pp_print_hstring pname
     print_type ptype
     print_term pterm;
 
-  fprintf fmt "@[<hov 1>(check@ %a@])@]@.@."
-    H.pp_print_hstring pname
+  if check then
+    fprintf fmt "@[<hov 1>(check@ %a@])@]@.@."
+      H.pp_print_hstring pname
 
 
 
-
-let write_inv_proof fmt (s_implication, s_base, s_induction) name_proof c =
+(* Write a proof of invariance by k-induction using the proof of its subcases
+   and a certificate constructed by Kind 2. See [!Certificate.invariant]. *)
+let write_inv_proof fmt ?(check=true)
+    (s_implication, s_base, s_induction) name_proof c =
   let open HS in
 
   (* LFSC atoms for formulas *)
@@ -640,10 +758,11 @@ let write_inv_proof fmt (s_implication, s_base, s_induction) name_proof c =
          ] in
   let ptype = List [a_invariant; a_init; a_trans; a_prop] in
 
-  write_proof_and_check fmt name_proof ptype pterm
+  write_proof_and_check fmt ~check name_proof ptype pterm
 
-
-let write_obs_eq_proof fmt proof_obs_name name_proof c =
+(* Write a proof of weak observational equivalence using the proof ob
+   invariance of the observer. *)
+let write_obs_eq_proof fmt ?(check=true) proof_obs_name name_proof c =
   
   let open HS in
 
@@ -678,11 +797,13 @@ let write_obs_eq_proof fmt proof_obs_name name_proof c =
           a_init_2; a_trans_2; a_prop_2]
   in
 
-  write_proof_and_check fmt name_proof ptype pterm  
+  write_proof_and_check fmt ~check name_proof ptype pterm  
 
 
-  
-let write_safe_proof fmt proof_inv proof_obs_eq name_proof kind2_s jkind_s =
+(* Write a proof of safety using the proof of invariance and the proof of weak
+   observational equivalence. *)
+let write_safe_proof fmt ?(check=true)
+    proof_inv proof_obs_eq name_proof kind2_s jkind_s =
   let open HS in
 
   (* LFSC atoms for formulas *)
@@ -711,10 +832,11 @@ let write_safe_proof fmt proof_inv proof_obs_eq name_proof kind2_s jkind_s =
   in
   let ptype = List [a_safe; a_init; a_trans; a_prop] in
   
-  write_proof_and_check fmt name_proof ptype pterm  
+  write_proof_and_check fmt ~check name_proof ptype pterm  
   
 
-
+(* Generate the LFSC proof of invariance for the original properties and write
+   it in the file [!proofname]. *)
 let generate_inv_proof inv =
 
   let proof_file = Filename.concat inv.dirname proofname in
@@ -758,16 +880,22 @@ let generate_inv_proof inv =
   
   printf "Extracting LFSC proof of base case from CVC4@.";
   let base_proof = proof_from_file ctx inv.base in
+  fprintf proof_fmt ";; Additional symbols@.%a@."
+    (print_delta_context ctx) base_proof.proof_context;
   fprintf proof_fmt ";; Proof of base case\n@.%a\n@."
     (print_proof s_base) base_proof;
 
   printf "Extracting LFSC proof of inductive case from CVC4@.";
   let induction_proof = proof_from_file ctx inv.induction in
+  fprintf proof_fmt ";; Additional symbols@.%a@."
+    (print_delta_context ctx) induction_proof.proof_context;
   fprintf proof_fmt ";; Proof of inductive case\n@.%a\n@."
     (print_proof s_induction) induction_proof;
 
   printf "Extracting LFSC proof of implication from CVC4@.";
   let implication_proof = proof_from_file ctx inv.implication in
+  fprintf proof_fmt ";; Additional symbols@.%a@."
+    (print_delta_context ctx) implication_proof.proof_context;
   fprintf proof_fmt ";; Proof of implication\n@.%a\n@."
     (print_proof s_implication) implication_proof;
 
@@ -781,6 +909,9 @@ let generate_inv_proof inv =
 
 
 
+(* Generate the LFSC proof of safey by producing an intermediate proofs of
+   observational equivalence for the frontend. The proof is written in the file
+   [!frontend_proofname]. *)
 let generate_frontend_proof inv =
 
   let proof_file = Filename.concat inv.dirname frontend_proofname in
@@ -797,33 +928,47 @@ let generate_frontend_proof inv =
      ;;------------------------------------------------------------------\n@."
     Version.package_name Version.version;
 
+  let ctx_k2 = context_from_file inv.kind2_system.smt2_lfsc_trace_file in
+  let ctx_jk = context_from_file inv.jkind_system.smt2_lfsc_trace_file in
+  let ctx_obs = context_from_file inv.obs_system.smt2_lfsc_trace_file in
   let ctx_phi = context_from_file inv.phi_lfsc_trace_file in
   fprintf proof_fmt ";; k-Inductive invariant for observer system\n@.%a\n@."
     print_defs ctx_phi;
 
-  let ctx = ctx_phi in
+  let ctx = ctx_phi
+            |> merge_contexts ctx_obs
+            |> merge_contexts ctx_jk
+            |> merge_contexts ctx_k2
+  in
   
   printf "Extracting LFSC proof of base case from CVC4@.";
   let base_proof = proof_from_file ctx inv.base in
+  fprintf proof_fmt ";; Additional symbols@.%a@."
+    (print_delta_context ctx) base_proof.proof_context;
   fprintf proof_fmt ";; Proof of base case\n@.%a\n@."
     (print_proof obs_base) base_proof;
 
   printf "Extracting LFSC proof of inductive case from CVC4@.";
   let induction_proof = proof_from_file ctx inv.induction in
+  fprintf proof_fmt ";; Additional symbols@.%a@."
+    (print_delta_context ctx) induction_proof.proof_context;
   fprintf proof_fmt ";; Proof of inductive case\n@.%a\n@."
     (print_proof obs_induction) induction_proof;
 
   printf "Extracting LFSC proof of implication from CVC4@.";
   let implication_proof = proof_from_file ctx inv.implication in
+  fprintf proof_fmt ";; Additional symbols@.%a@."
+    (print_delta_context ctx) implication_proof.proof_context;
   fprintf proof_fmt ";; Proof of implication\n@.%a\n@."
     (print_proof obs_implication) implication_proof;
 
   fprintf proof_fmt ";; Proof of invariance by %d-induction\n@." inv.k;
-  write_inv_proof proof_fmt
+  write_inv_proof proof_fmt ~check:false
     (obs_implication, obs_base, obs_induction) proof_obs_name inv;
 
   fprintf proof_fmt ";; Proof of observational equivalence\n@.";
-  write_obs_eq_proof proof_fmt proof_obs_name proof_obs_eq_name inv;
+  write_obs_eq_proof proof_fmt ~check:false
+    proof_obs_name proof_obs_eq_name inv;
 
   fprintf proof_fmt ";; Final proof of safety\n@.";
   write_safe_proof proof_fmt proof_inv_name proof_obs_eq_name
