@@ -39,7 +39,7 @@ let file_width = 120
 let quant_free = true
 let monolithic_base = true
 let simple_base = false
-let abstr_index () = Flags.proof ()
+let abstr_index () = Flags.Certif.abstr ()
 let clean_tmp = false
 let call_frontend = true
 
@@ -498,7 +498,7 @@ let check_ind_and_trim ~just_check_ind
 
      (* Continuation: execute fixpoint *)
      let cont () =
-       match Flags.certif_mininvs () with
+       match Flags.Certif.mininvs () with
        | `HardOnly | `MediumOnly ->
          (* Only do the first inductive check if we want only hard
             minimization *)
@@ -551,8 +551,8 @@ let rec cherry_pick solver trans
          List.fold_left (fun (other, extra, found) ((inv, _) as ii) ->
              (* Only add the first invariant if we want to do the hardest
                 minimization *)
-             if (Flags.certif_mininvs () = `Hard ||
-                 Flags.certif_mininvs () = `HardOnly) &&
+             if (Flags.Certif.mininvs () = `Hard ||
+                 Flags.Certif.mininvs () = `HardOnly) &&
                 found then
                ii :: other, extra, true
              else if not (eval inv) then other, ii :: extra, true
@@ -667,7 +667,7 @@ let try_at_bound ?(just_check_ind=false) sys solver k invs prop trans_acts =
   in
 
   let follow_up =
-    match Flags.certif_mininvs () with
+    match Flags.Certif.mininvs () with
     | `Easy -> map_back_to_invs
     | `Medium | `MediumOnly | `Hard | `HardOnly ->
       (* Second phase of harder minimization if we decide to not stop at easy *)
@@ -874,7 +874,7 @@ let find_bound_frontier_dicho sys solver kmax invs prop =
 (* Minimization of certificate: returns the minimum bound for k-induction and a
    list of useful invariants for this preservation step *)
 let minimize_certificate sys =
-  printf "Certificate minimization@.";
+  printf "@{<b>Certificate minimization@}@.";
 
   (* Extract certificates of top level system *)
   let props, certs = extract_props_certs sys in
@@ -894,7 +894,7 @@ let minimize_certificate sys =
   (* Creating solver that will be used to replay and minimize inductive step *)
   let solver =
     SMTSolver.create_instance ~produce_cores:true
-      (TransSys.get_logic sys) (Flags.smtsolver ())
+      (TransSys.get_logic sys) (Flags.Smt.solver ())
   in
   
   (* Defining uf's and declaring variables. *)
@@ -908,7 +908,7 @@ let minimize_certificate sys =
   (* The property we want to re-verify the conjunction of all the properties *)
   let prop = Term.mk_and props in
 
-  let min_strategy = match Flags.certif_min () with
+  let min_strategy = match Flags.Certif.mink () with
     | `No -> assert false
     | (`Fwd | `Bwd | `Dicho | `FrontierDicho) as s -> s
     | `Auto ->
@@ -1182,6 +1182,8 @@ let add_decl_index fmt k =
       fprintf fmt "(declare-fun %s () %s)@." (index_sym_of_int i) ty_index_name;
     done
   end
+  (* else  *)
+  (*   fprintf fmt "(define-sort %s () Int)\n@." ty_index_name *)
 
 
 
@@ -1287,7 +1289,10 @@ let export_system ~trace_lfsc_defs
   (* Conjunction of properties *)
   let prop = extract_props_terms sys in
 
-  if trace_lfsc_defs then add_decl_index fmt (-1);
+  if trace_lfsc_defs then begin
+    add_logic fmt sys;
+    add_decl_index fmt (-1);
+  end;
   
   (* declare state variables, write I, T and P *)
   mononames_system fmt ~trace_lfsc_defs description sys name_sys prop names;  
@@ -1301,14 +1306,17 @@ let export_system ~trace_lfsc_defs
   close_out oc
 
 
-let export_phi ~trace_lfsc_defs dirname file definitions_files names phi =
+let export_phi ~trace_lfsc_defs dirname file definitions_files names sys phi =
 
   let filename = Filename.concat dirname file in
   let oc =
     if trace_lfsc_defs then
       files_cat_open
         ~add_prefix:(fun fmt ->
-            if trace_lfsc_defs then add_decl_index fmt (-1) else ())
+            if trace_lfsc_defs then begin
+              add_logic fmt sys;
+              add_decl_index fmt (-1)
+            end else ())
         definitions_files filename |> Unix.out_channel_of_descr
     else open_out filename in
   let fmt = formatter_of_out_channel oc in
@@ -1483,7 +1491,7 @@ let generate_split_certificates sys dirname =
   Stat.start_timer Stat.certif_min_time;
 
   (* Performed minimization of certificate *)
-  let k, phi = match Flags.certif_min () with
+  let k, phi = match Flags.Certif.mink () with
     | `No -> k, phi
     | _ ->
       (* Simplify certificate *)
@@ -1509,10 +1517,10 @@ let generate_split_certificates sys dirname =
 
   (* Export k-inductive invariant phi in SMT-LIB2 format *)
   export_phi ~trace_lfsc_defs:false
-    dirname kind2_phi_f [kind2_defs_path] names_kind2 phi;
+    dirname kind2_phi_f [kind2_defs_path] names_kind2 sys phi;
 
   export_phi ~trace_lfsc_defs:true
-    dirname kind2_phi_lfsc_f [kind2_defs_path] names_kind2 phi;
+    dirname kind2_phi_lfsc_f [kind2_defs_path] names_kind2 sys phi;
 
   let kind2_phi_path = Filename.concat dirname kind2_phi_f in
   let kind2_phi_lfsc_path = Filename.concat dirname kind2_phi_lfsc_f in
@@ -1553,7 +1561,8 @@ let generate_split_certificates sys dirname =
   Stat.record_time Stat.certif_gen_time;
 
   (* Show which file contains the certificate *)
-  printf "SMT-LIB2 certificates were written in %s@." dirname;
+  (debug certif
+     "SMT-LIB2 intermediate certificates were written in %s" dirname end);
 
   inv
 
@@ -1592,7 +1601,7 @@ let generate_certificate sys dirname =
   Stat.start_timer Stat.certif_min_time;
 
   (* Performed minimization of certificate *)
-  let k , phi = match Flags.certif_min () with
+  let k , phi = match Flags.Certif.mink () with
     | `No -> k, phi
     | _ ->
       (* Simplify certificate *)
@@ -1832,7 +1841,7 @@ let generate_certificate sys dirname =
   Stat.record_time Stat.certif_gen_time;
 
   (* Show which file contains the certificate *)
-  printf "Certificate checker was written in %s@." certificate_filename
+  printf "Certificate checker was written in @{<b>%s@}@." certificate_filename
 
 
 
@@ -2204,7 +2213,7 @@ let merge_systems lustre_vars kind2_sys jkind_sys =
       trans_term
       [kind2_subsys_inst; jkind_subsys_inst]
       props
-      [] [] [] in
+      (None, []) [] [] in
 
   (* (\* Add caller info to subnodes *\) *)
   (* TS.add_caller kind2_sys *)
@@ -2220,7 +2229,7 @@ let merge_systems lustre_vars kind2_sys jkind_sys =
 
 let export_obs_system ~trace_lfsc_defs
     dirname file definitions_files
-    name_sys names_obs names_kind2 names_jkind same_inputs_term =
+    name_sys names_obs names_kind2 names_jkind kind2_sys same_inputs_term =
 
   let filename = Filename.concat dirname file in
 
@@ -2228,7 +2237,10 @@ let export_obs_system ~trace_lfsc_defs
     if trace_lfsc_defs then
       files_cat_open
         ~add_prefix:(fun fmt ->
-            if trace_lfsc_defs then add_decl_index fmt (-1) else ())
+            if trace_lfsc_defs then begin
+              add_logic fmt kind2_sys;
+              add_decl_index fmt (-1)
+            end else ())
         definitions_files filename |> Unix.out_channel_of_descr
     else open_out filename in
   let fmt = formatter_of_out_channel oc in
@@ -2371,11 +2383,11 @@ let generate_frontend_obs node kind2_sys dirname =
   (* Export Observer system in SMT-LIB2 format for use in proof *)
   export_obs_system ~trace_lfsc_defs:false
     dirname obs_defs_f observer_deps
-    "OBS" names_obs names_kind2 names_jkind same_inputs_term;
+    "OBS" names_obs names_kind2 names_jkind kind2_sys same_inputs_term;
 
   export_obs_system ~trace_lfsc_defs:true
     dirname obs_defs_lfsc_f observer_deps
-    "OBS" names_obs names_kind2 names_jkind same_inputs_term;
+    "OBS" names_obs names_kind2 names_jkind kind2_sys same_inputs_term;
 
   let obs_defs_path = Filename.concat dirname obs_defs_f in
   let obs_defs_lfsc_path = Filename.concat dirname obs_defs_lfsc_f in
@@ -2397,8 +2409,8 @@ let generate_frontend_obs node kind2_sys dirname =
   Stat.record_time Stat.certif_frontend_time;
 
   (* Show which file contains the certificate *)
-  printf "Frontend eq-observer was written in %s, \
-          run Kind 2 on it with option --certif@." filename;
+  (debug printf "Frontend eq-observer was written in %s, \
+                 run Kind 2 on it" filename end);
 
   jkind_cert_sys, obs_cert_sys
 
@@ -2417,7 +2429,7 @@ let generate_frontend_certificates sys dirname =
   Stat.start_timer Stat.certif_min_time;
 
   (* Perform minimization of certificate *)
-  let k, phi = match Flags.certif_min () with
+  let k, phi = match Flags.Certif.mink () with
     | `No -> k, phi
     | _ ->
       (* Simplify certificate *)
@@ -2438,10 +2450,10 @@ let generate_frontend_certificates sys dirname =
            |> List.map (Filename.concat dirname) in
   
   (* Export k-inductive invariant phi in SMT-LIB2 format *)
-  export_phi ~trace_lfsc_defs:false dirname obs_phi_f deps names_obs phi;
+  export_phi ~trace_lfsc_defs:false dirname obs_phi_f deps names_obs sys phi;
 
   export_phi ~trace_lfsc_defs:true dirname obs_phi_lfsc_f
-    deps names_obs phi;
+    deps names_obs sys phi;
 
   let obs_phi_path = Filename.concat dirname obs_phi_f in
   let obs_phi_lfsc_path = Filename.concat dirname obs_phi_lfsc_f in
@@ -2488,7 +2500,8 @@ let generate_frontend_certificates sys dirname =
   Stat.record_time Stat.certif_gen_time;
 
   (* Show which file contains the certificate *)
-  printf "SMT-LIB2 frontend certificates were written in %s@." dirname;
+  (debug certif
+     "SMT-LIB2 frontend certificates were written in %s" dirname end);
 
   inv
 
@@ -2553,8 +2566,10 @@ let generate_smt2_certificates input sys =
   
   let dirname =
     if is_fec sys then Filename.dirname (Flags.input_file ())
-    else Filename.concat (Flags.certif_dir ())
-         (Filename.basename (Flags.input_file ()) ^ "_certificates")
+    else begin
+      Flags.output_dir () |> mk_dir ;
+      Filename.concat (Flags.output_dir ()) "certificates"
+    end
   in
   create_dir dirname;
 
@@ -2562,7 +2577,10 @@ let generate_smt2_certificates input sys =
 
   (* Only generate frontend observational equivalence system for Lustre *)
   if InputSystem.is_lustre_input input then
-    generate_frontend_obs input sys dirname |> ignore
+    try
+      generate_frontend_obs input sys dirname |> ignore
+    with Failure s ->
+      Event.log L_warn "%s@ No frontend observer." s
   else
     printf "No certificate for frontend@.";
 
@@ -2582,7 +2600,7 @@ let generate_smt2_certificates input sys =
 
   if not (is_fec sys) && call_frontend then begin
 
-    printf "Generating frontend certificate@.";
+    printf "@{<b>Generating frontend certificate}@.";
     let cmd_l =
       Array.to_list Sys.argv
       |> List.filter (fun s -> s <> (Flags.input_file ()))
@@ -2593,12 +2611,13 @@ let generate_smt2_certificates input sys =
         (pp_print_list pp_print_string " ") cmd_l
         (Filename.concat dirname "FEC.kind2")
     in
-    printf "Second run with: %s@." cmd;
+    (debug certif "Second run with: %s" cmd end);
 
     match Sys.command cmd with
     | 0 -> ()
     | c ->
-      printf "Failed to generate frontend certificate (return code %d)@." c
+      Event.log L_warn
+        "Failed to generate frontend certificate (return code %d)@." c
   end;
 
 
@@ -2625,27 +2644,32 @@ let generate_all_proofs input sys =
   
   let dirname =
     if is_fec sys then Filename.dirname (Flags.input_file ())
-    else Filename.concat (Flags.certif_dir ())
-         (Filename.basename (Flags.input_file ()) ^ "_certificates")
+    else begin
+      Flags.output_dir () |> mk_dir ;
+      Filename.concat (Flags.output_dir ()) "certificates"
+    end
   in
   create_dir dirname;
 
   if not (is_fec sys) then
     
     let cert_inv = generate_split_certificates sys dirname in
+
+    Proof.generate_inv_proof cert_inv;
     
     (* Only generate frontend observational equivalence system for Lustre *)
     if InputSystem.is_lustre_input input then
-      generate_frontend_obs input sys dirname |> ignore
+      try
+        generate_frontend_obs input sys dirname |> ignore
+      with Failure s ->
+        Event.log L_warn "%s@ No frontend observer." s
     else
-      printf "No certificate for frontend@.";
-    
-    Proof.generate_inv_proof cert_inv;
-    
+      (debug certif "No certificate for frontend" end);
+
 
     if call_frontend then begin
 
-      printf "Generating frontend proof@.";
+      printf "@{<b>Generating frontend proof@}@.";
       let cmd_l =
         Array.to_list Sys.argv
         |> List.filter (fun s -> s <> (Flags.input_file ()))
@@ -2656,29 +2680,31 @@ let generate_all_proofs input sys =
           (pp_print_list pp_print_string " ") cmd_l
           (Filename.concat dirname "FEC.kind2")
       in
-      printf "Second run with: %s@." cmd;
+      (debug certif "Second run with: %s" cmd end);
 
       let inv_lfsc = Filename.concat dirname Proof.proofname in
       let front_lfsc = Filename.concat dirname Proof.frontend_proofname in
-      let final_lfsc = Filename.concat
-          (Flags.certif_dir ())
+      Flags.output_dir () |> mk_dir ;
+      let final_lfsc =
+        Filename.concat (Flags.output_dir ())
           (Filename.basename (Flags.input_file ()) ^ ".lfsc") in
 
       begin match Sys.command cmd with
-        | 0 ->
+        | 020 ->
           files_cat_open [inv_lfsc; front_lfsc] final_lfsc |> Unix.close
 
         | c ->
-          printf "Failed to generate frontend proof (return code %d)@." c;
+          Event.log L_warn
+            "Failed to generate frontend proof (return code %d)@." c;
           file_copy inv_lfsc final_lfsc
       end;
 
       if clean_tmp then begin
-        printf "Cleaning temporary files@.";
+        (debug certif "Cleaning temporary files" end);
         remove dirname;
       end;
 
-      printf "Final LFSC proof written to %s@." final_lfsc;
+      printf "Final @{<green>LFSC proof@} written to @{<b>%s@}@." final_lfsc;
     end;
 
   else begin

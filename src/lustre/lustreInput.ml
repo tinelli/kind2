@@ -26,9 +26,8 @@ module D = LustreDeclarations
 module S = SubSystem
 
 
-
-(* Parse from input channel *)
-let of_channel in_ch = 
+(* Constructs an AST from an input channel. *)
+let ast_of_channel in_ch =
 
   (* Create lexing buffer *)
   let lexbuf = Lexing.from_function LustreLexer.read_from_lexbuf_stack in
@@ -39,27 +38,26 @@ let of_channel in_ch =
     (try Filename.dirname (Flags.input_file ())
      with Failure _ -> Sys.getcwd ());
 
-  (* Lustre file is a list of declarations *)
-  let declarations = 
+  try
+    (* Parse file to list of declarations *)
+    LustreParser.main LustreLexer.token lexbuf 
+  with
+  | LustreParser.Error ->
+    let lexer_pos = Lexing.lexeme_start_p lexbuf in
+    C.fail_at_position (position_of_lexing lexer_pos) "Syntax error"
 
-    try 
 
-      (* Parse file to list of declarations *)
-      LustreParser.main LustreLexer.token lexbuf 
+(* Parse from input channel *)
+let of_channel in_ch =
 
-    with 
+  (* Get declarations from channel. *)
+  let declarations = ast_of_channel in_ch in
 
-      | LustreParser.Error ->
+  (* Format.printf "declarations:@   @[<v>%a@]@.@."
+    (pp_print_list LustreAst.pp_print_declaration "@ ") declarations ; *)
 
-        let lexer_pos = 
-          Lexing.lexeme_start_p lexbuf 
-        in
+  (* failwith "stop" ; *)
 
-        C.fail_at_position
-          (position_of_lexing lexer_pos)
-          "Syntax error"
-
-  in
 
   (* Simplify declarations to a list of nodes *)
   let nodes, globals = D.declarations_to_nodes declarations in
@@ -68,7 +66,7 @@ let of_channel in_ch =
   let main_node = 
 
     (* Command-line flag for main node given? *)
-    match Flags.lustre_main () with 
+    match Flags.lus_main () with 
       
       (* Use given identifier to choose main node *)
       | Some s -> LustreIdent.mk_string_ident s
@@ -113,15 +111,28 @@ let of_channel in_ch =
   (* Return a subsystem tree from the list of nodes *)
   N.subsystem_of_nodes nodes', globals
   
+(* Returns the AST from a file. *)
+let ast_of_file filename =
+
+  (* Open the given file for reading *)
+  let in_ch = match filename with
+    | "" -> stdin
+    | _ -> open_in filename
+  in
+
+  ast_of_channel in_ch
+
 
 (* Open and parse from file *)
-let of_file filename = 
+let of_file filename =
 
-    (* Open the given file for reading *)
-    let use_file = open_in filename in
-    let in_ch = use_file in
+  (* Open the given file for reading *)
+  let in_ch = match filename with
+    | "" -> stdin
+    | _ -> open_in filename
+  in
 
-    of_channel in_ch
+  of_channel in_ch
 
 
 (* 
