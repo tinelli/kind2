@@ -39,7 +39,7 @@ let set_margin fmt = pp_set_margin fmt 80 (* (if compact then max_int else 80) *
 
 let cvc4_proof_cmd =
   Flags.Smt.cvc4_bin () ^
-  " --lang smt2 --no-simplification --dump-proof"
+  " --lang smt2 --no-simplification --fewer-preprocessing-holes --dump-proof"
 
 
 let get_cvc4_version () =
@@ -64,6 +64,7 @@ let s_false = H.mk_hstring "false"
 let s_formula = H.mk_hstring "formula"
 let s_th_holds = H.mk_hstring "th_holds"
 let s_holds = H.mk_hstring "holds"
+let s_truth = H.mk_hstring "truth"
 
 let s_sort = H.mk_hstring "sort"
 let s_term = H.mk_hstring "term"
@@ -91,8 +92,27 @@ let s_unsat = H.mk_hstring "unsat"
 let s_sat = H.mk_hstring "sat"
 let s_unknown = H.mk_hstring "unknown"
 
+
+let global_logic = ref `None
+
+let set_proof_logic l = global_logic := l
+
+let abstr_ind_of_logic = let open TermLib in
+  function
+  | `Inferred fs ->
+    if FeatureSet.mem RA fs then
+      if FeatureSet.mem IA fs then
+        failwith "CVC4 cannot generate proofs for systems with both \
+                  integer and real variables"
+      else true
+    else false
+  | _ -> false
+
+let abstr_index () =
+  Flags.Certif.abstr () || abstr_ind_of_logic !global_logic
+
 let s_index () =
-  if Flags.Certif.abstr () then H.mk_hstring "index"
+  if abstr_index () then H.mk_hstring "index"
   else H.mk_hstring "Int"
 
 let s_pindex = H.mk_hstring "%index%"
@@ -210,6 +230,7 @@ let mk_empty_proof_context () = {
 (* The type of a proof returned by CVC4 *)
 type cvc4_proof = {
   proof_context : cvc4_proof_context;
+  mutable true_hyps : H.t list;
   proof_hyps : lfsc_decl list; 
   proof_type : lfsc_type;
   proof_term : lfsc_type;
@@ -219,6 +240,7 @@ type cvc4_proof = {
 let mk_empty_proof ctx = {
   proof_context = ctx;
   proof_hyps = [];
+  true_hyps = [];
   proof_type = HS.List [];
   proof_term = HS.List [];
 }
@@ -230,6 +252,7 @@ type lambda_kind =
   | Lambda_hyp of lfsc_decl  (* Proof hypothesis % A0 ...*)
   | Lambda_def of lfsc_def   (* definitions % f%def *)
   | Lambda_ignore            (* ignore some extraneous symbols *)
+  | Lambda_true
 
 
 
@@ -567,7 +590,7 @@ let parse_Lambda_binding ctx b ty =
   if ih then
     if is_hyp_true ty then
       (* ignore useless (th_holds true) *)
-      Lambda_ignore
+      Lambda_true
     else match definition_artifact ctx ty with
       | Some def ->
         (* binding hypothesis for a definition artifact *)
@@ -610,22 +633,31 @@ let rec parse_proof acc = let open HS in function
         else { acc with proof_context =
                           { ctx with lfsc_defs = d :: ctx.lfsc_defs }}
       | Lambda_ignore -> acc
+      | Lambda_true -> { acc with true_hyps = b :: acc.true_hyps }
       | Lambda_hyp h -> { acc with proof_hyps = h :: acc.proof_hyps }
     in
     parse_proof acc r
 
   | List [Atom ascr; ty; pterm] when ascr = s_ascr ->
 
-    { acc with proof_type = ty; proof_term = embed_indexes [] pterm }
+    let pterm = embed_indexes [] pterm in
+    let sigma_truth =
+      List.map (fun a -> Atom a, Atom s_truth) acc.true_hyps in
+    let pterm =
+      if sigma_truth = [] then pterm
+      else apply_subst sigma_truth pterm in
+    { acc with proof_type = ty; proof_term = pterm  }
 
-  | _ -> assert false
+  | s ->
+    failwith (asprintf "Unexpected proof:\n%a@." (HS.pp_print_sexpr_indent 0) s)
 
 
 (* Parse a proof from CVC4 from one that start with [(check ...]. *)
 let parse_proof_check ctx = let open HS in function
   | List [Atom check; proof] when check == s_check ->
     parse_proof (mk_empty_proof ctx) proof
-  | _ -> assert false
+  | s ->
+    failwith (asprintf "Unexpected proof:\n%a@." (HS.pp_print_sexpr_indent 0) s)
 
 
 
@@ -650,7 +682,10 @@ let proof_from_chan ctx in_ch =
 
       parse_proof_check ctx proof
       
-    | _ -> assert false
+    | _ ->
+      failwith (asprintf "No proofs, instead got:\n%a@."
+                  HS.pp_print_sexpr_list sexps)
+
 
 
 (* Call CVC4 in proof production mode on an SMT2 file an returns the proof *)
@@ -682,20 +717,23 @@ let rec parse_context ctx = let open HS in function
     let ctx = match parse_Lambda_binding ctx b ty with
       | Lambda_decl d -> { ctx with lfsc_decls = d :: ctx.lfsc_decls }
       | Lambda_def d -> { ctx with lfsc_defs = d :: ctx.lfsc_defs }
-      | Lambda_hyp _ | Lambda_ignore -> ctx
+      | Lambda_hyp _ | Lambda_ignore | Lambda_true -> ctx
     in
     parse_context ctx r
 
   | List [Atom ascr; _; _] when ascr = s_ascr -> ctx
 
-  | _ -> assert false
+  | s ->
+    failwith (asprintf "Unexpected proof:\n%a@." (HS.pp_print_sexpr_indent 0) s)
 
 
 (* Parse a context from a dummy proof check used only for tracing *)
 let parse_context_dummy = let open HS in function
   | List [Atom check; dummy] when check == s_check ->
     parse_context (mk_empty_proof_context ()) dummy
-  | _ -> assert false
+
+  | s ->
+    failwith (asprintf "Unexpected proof:\n%a@." (HS.pp_print_sexpr_indent 0) s)
 
 
 (* Parse a context from a channel. The goal is trivial because the file
@@ -720,7 +758,11 @@ let context_from_chan in_ch =
 
       parse_context_dummy dummy_proof
       
-    | _ -> assert false
+    | _ ->
+      failwith (asprintf "No proofs, instead got:\n%a@."
+                  HS.pp_print_sexpr_list sexps)
+
+
 
 (* Call CVC4 on a file that contains only tracing information and parse the
    dummy proof to extract the context (declarations and definitions). *)
@@ -749,9 +791,23 @@ let merge_contexts ctx1 ctx2 =
       let h = HH.create 21 in
       HH.iter (HH.add h) ctx1.fun_defs_args;
       HH.iter (HH.add h) ctx2.fun_defs_args;
-      h
+      h;
   }
 
+
+
+let context_from_file f =
+  Stat.start_timer Stat.certif_cvc4_time;
+  let c = context_from_file f in
+  Stat.record_time Stat.certif_cvc4_time;
+  c
+  
+let proof_from_file f =
+  Stat.start_timer Stat.certif_cvc4_time;
+  let p = proof_from_file f in
+  Stat.record_time Stat.certif_cvc4_time;
+  p
+  
 
 
 open Certificate

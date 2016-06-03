@@ -39,7 +39,7 @@ let file_width = 120
 let quant_free = true
 let monolithic_base = true
 let simple_base = false
-let abstr_index () = Flags.Certif.abstr ()
+let abstr_index () = Proof.abstr_index ()
 let clean_tmp = false
 let call_frontend = true
 
@@ -1489,6 +1489,8 @@ let generate_split_certificates sys dirname =
   let prop, (k, phi) = global_certificate sys in
 
   Stat.start_timer Stat.certif_min_time;
+  Stat.set k Stat.certif_old_k;
+  Stat.set (Certificate.size (k, phi)) Stat.certif_old_size;
 
   (* Performed minimization of certificate *)
   let k, phi = match Flags.Certif.mink () with
@@ -1599,6 +1601,8 @@ let generate_certificate sys dirname =
   let prop, (k, phi) = global_certificate sys in
 
   Stat.start_timer Stat.certif_min_time;
+  Stat.set k Stat.certif_old_k;
+  Stat.set (Certificate.size (k, phi)) Stat.certif_old_size;
 
   (* Performed minimization of certificate *)
   let k , phi = match Flags.Certif.mink () with
@@ -2119,13 +2123,16 @@ let merge_systems lustre_vars kind2_sys jkind_sys =
   let orig_kind2_vars = TS.state_vars kind2_sys in
   let orig_jkind_vars = TS.state_vars jkind_sys in
 
-  let init_flag = StateVar.mk_init_flag [obs_name] in
+  (* let init_flag = StateVar.mk_init_flag [obs_name] in *)
+  let init_flag = TS.init_flag_state_var kind2_sys
+                  |> add_scope_state_var [obs_name] in
 
   (* Create versions of variables with the new scope *)
   let kind2_vars = List.map (add_scope_state_var [obs_name]) orig_kind2_vars in
   let jkind_vars = List.map (add_scope_state_var [obs_name]) orig_jkind_vars in
   let state_vars =
-    init_flag :: kind2_vars @ jkind_vars |>
+    (* init_flag :: *)
+    kind2_vars @ jkind_vars |>
     List.filter (fun sv ->
         not (StateVar.equal_state_vars
                sv (TransSys.init_flag_state_var kind2_sys)))
@@ -2427,6 +2434,8 @@ let generate_frontend_certificates sys dirname =
   let prop, (k, phi) = global_certificate sys in
 
   Stat.start_timer Stat.certif_min_time;
+  Stat.set k Stat.certif_old_k;
+  Stat.set (Certificate.size (k, phi)) Stat.certif_old_size;
 
   (* Perform minimization of certificate *)
   let k, phi = match Flags.Certif.mink () with
@@ -2562,6 +2571,8 @@ let fecc_checker_script =
 (* Generate all certificates in the directory given by {!Flags.certif_dir}. *)
 let generate_smt2_certificates input sys =
 
+  Proof.set_proof_logic (TS.get_logic sys);
+  
   TH.clear hactlits;
   
   let dirname =
@@ -2573,7 +2584,11 @@ let generate_smt2_certificates input sys =
   in
   create_dir dirname;
 
-  generate_certificate sys dirname;
+  (try generate_certificate sys dirname
+   with e ->
+     (* Send statistics *)
+     Event.stat Stat.[certif_stats_title, certif_stats];
+     raise e);
 
   (* Only generate frontend observational equivalence system for Lustre *)
   if InputSystem.is_lustre_input input then
@@ -2596,8 +2611,10 @@ let generate_smt2_certificates input sys =
     (if is_fec sys then fecc_checker_script else certificate_checker_script);
   close_out csoc;
 
-  (* Recursive call *)
+  (* Send statistics *)
+  Event.stat Stat.[certif_stats_title, certif_stats];
 
+  (* Recursive call *)
   if not (is_fec sys) && call_frontend then begin
 
     printf "@{<b>Generating frontend certificate}@.";
@@ -2618,12 +2635,7 @@ let generate_smt2_certificates input sys =
     | c ->
       Event.log L_warn
         "Failed to generate frontend certificate (return code %d)@." c
-  end;
-
-
-  (* Send statistics *)
-  Event.stat Stat.[certif_stats_title, certif_stats]
-  
+  end  
 
 
 (********************************)
@@ -2637,9 +2649,17 @@ let remove dirname =
   Unix.rmdir dirname
 
 
+(* Temporary fix for proofs that contain dummy A0 input *)
+let fix_A0 final_lfsc =
+  Sys.command ("sed -i '' 's/A0/truth/' " ^ final_lfsc)
+  |> ignore
+
+
 (* Generate all certificates in the directory given by {!Flags.certif_dir}. *)
 let generate_all_proofs input sys =
 
+  Proof.set_proof_logic (TS.get_logic sys);
+  
   TH.clear hactlits;
   
   let dirname =
@@ -2651,11 +2671,25 @@ let generate_all_proofs input sys =
   in
   create_dir dirname;
 
-  if not (is_fec sys) then
+  if not (is_fec sys) then begin
     
-    let cert_inv = generate_split_certificates sys dirname in
+    (try
+       let cert_inv = generate_split_certificates sys dirname in
+       Proof.generate_inv_proof cert_inv;
+     with e ->
+       (* Send statistics *)
+       Event.stat Stat.[certif_stats_title, certif_stats];
+       raise e);
 
-    Proof.generate_inv_proof cert_inv;
+    let inv_lfsc = Filename.concat dirname Proof.proofname in
+    let front_lfsc = Filename.concat dirname Proof.frontend_proofname in
+    Flags.output_dir () |> mk_dir ;
+    let final_lfsc =
+      Filename.concat (Flags.output_dir ())
+        (Filename.basename (Flags.input_file ()) ^ ".lfsc") in
+
+    (* Copy first LFSC proof in case *)
+    file_copy inv_lfsc final_lfsc;
     
     (* Only generate frontend observational equivalence system for Lustre *)
     if InputSystem.is_lustre_input input then
@@ -2666,6 +2700,8 @@ let generate_all_proofs input sys =
     else
       (debug certif "No certificate for frontend" end);
 
+    (* Send statistics *)
+    Event.stat Stat.[certif_stats_title, certif_stats];
 
     if call_frontend then begin
 
@@ -2682,13 +2718,6 @@ let generate_all_proofs input sys =
       in
       (debug certif "Second run with: %s" cmd end);
 
-      let inv_lfsc = Filename.concat dirname Proof.proofname in
-      let front_lfsc = Filename.concat dirname Proof.frontend_proofname in
-      Flags.output_dir () |> mk_dir ;
-      let final_lfsc =
-        Filename.concat (Flags.output_dir ())
-          (Filename.basename (Flags.input_file ()) ^ ".lfsc") in
-
       begin match Sys.command cmd with
         | 020 ->
           files_cat_open [inv_lfsc; front_lfsc] final_lfsc |> Unix.close
@@ -2704,18 +2733,23 @@ let generate_all_proofs input sys =
         remove dirname;
       end;
 
+      (* fix_A0 final_lfsc; *) (* temporary *)
       printf "Final @{<green>LFSC proof@} written to @{<b>%s@}@." final_lfsc;
     end;
-
+  end
   else begin
 
     let frontend_inv = generate_frontend_certificates sys dirname in
 
-    Proof.generate_frontend_proof frontend_inv;
+    (try
+      Proof.generate_frontend_proof frontend_inv;
+     with e ->
+       (* Send statistics *)
+       Event.stat Stat.[certif_stats_title, certif_stats];
+       raise e);
 
-  end;
+    (* Send statistics *)
+    Event.stat Stat.[certif_stats_title, certif_stats];
 
-  
-  (* Send statistics *)
-  Event.stat Stat.[certif_stats_title, certif_stats]
+  end
   
