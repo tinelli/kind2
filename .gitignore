@@ -1,6 +1,9 @@
 # Log files.
 *.log
 
+# spam directory.
+_opam
+
 # Generated bin directory.
 bin
 

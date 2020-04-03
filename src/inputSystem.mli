@@ -69,7 +69,7 @@ val pp_print_path_xml : _ t -> TransSys.t -> TransSys.instance list -> bool -> F
 (** Output a path in the input system *)
 val pp_print_path_json : _ t -> TransSys.t -> TransSys.instance list -> bool -> Format.formatter -> Model.path -> unit
 
-(** Output a model as a sequnce of inputs in CSV. *)
+(** Output a model as a sequence of inputs in CSV. *)
 val pp_print_path_in_csv : _ t -> TransSys.t -> TransSys.instance list -> bool -> Format.formatter -> Model.path -> unit
 
 (** Output all subsystems of the input system **)
@@ -84,7 +84,7 @@ val reconstruct_lustre_streams :
   (StateVar.t * (LustreIdent.t * int * LustreNode.call_cond list) list) list
     StateVar.StateVarMap.t
 
-(** Returns a map from state variables to lustre-like names *)
+(** Returns a map from state variables to Lustre-like names *)
 val mk_state_var_to_lustre_name_map :
   _ t -> StateVar.t list -> string StateVar.StateVarMap.t
 
